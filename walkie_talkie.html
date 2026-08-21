@@ -24,10 +24,7 @@
     --bubble-them: #1f232b;
   }
   * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
-  html, body {
-    height: 100%;
-    overscroll-behavior: none;
-  }
+  html, body { height: 100%; overscroll-behavior: none; }
   body {
     margin: 0;
     background: var(--bg);
@@ -37,19 +34,12 @@
     justify-content: center;
   }
   .wrap {
-    width: 100%;
-    max-width: 480px;
-    display: flex;
-    flex-direction: column;
-    height: 100vh;
-    height: 100svh;
+    width: 100%; max-width: 480px; display: flex; flex-direction: column;
+    height: 100vh; height: 100svh;
   }
 
   /* Setup screen */
-  #setupScreen {
-    padding: max(24px, env(safe-area-inset-top)) 16px 24px;
-    overflow-y: auto;
-  }
+  #setupScreen { padding: max(24px, env(safe-area-inset-top)) 16px 24px; overflow-y: auto; }
   #setupScreen h1 { font-size: 20px; margin: 0 0 4px; }
   #setupScreen .subtitle { color: var(--muted); font-size: 13px; margin-bottom: 20px; }
   .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 16px; margin-bottom: 16px; }
@@ -72,11 +62,17 @@
   /* Chat screen */
   #chatScreen { display: none; flex-direction: column; height: 100%; overflow: hidden; }
   .header {
-    display: flex; align-items: center; justify-content: space-between;
+    display: flex; align-items: center; gap: 10px;
     padding: 14px 16px; padding-top: max(14px, env(safe-area-inset-top));
     border-bottom: 1px solid var(--border); background: var(--panel);
     flex-shrink: 0;
   }
+  .backBtn {
+    width: auto; background: transparent; padding: 4px 6px 4px 0;
+    font-size: 22px; line-height: 1; color: var(--text); font-weight: 400;
+  }
+  .backBtn:hover, .backBtn:active { background: transparent; transform: none; color: var(--accent); }
+  .headerInfo { flex: 1; min-width: 0; }
   .header .title { font-size: 15px; font-weight: 600; }
   .status { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); }
   .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--danger); }
@@ -88,9 +84,7 @@
   .bubble-row { display: flex; }
   .bubble-row.me { justify-content: flex-end; }
   .bubble-row.them { justify-content: flex-start; }
-  .bubble {
-    max-width: 75%; padding: 9px 13px; border-radius: 16px; font-size: 15px; word-break: break-word;
-  }
+  .bubble { max-width: 75%; padding: 9px 13px; border-radius: 16px; font-size: 15px; word-break: break-word; }
   .bubble-row.me .bubble { background: var(--bubble-me); border-bottom-right-radius: 4px; }
   .bubble-row.them .bubble { background: var(--bubble-them); border: 1px solid var(--border); border-bottom-left-radius: 4px; }
   .bubble .time { display: block; font-size: 10px; color: rgba(255,255,255,0.5); margin-top: 3px; }
@@ -136,8 +130,11 @@
   <!-- CHAT SCREEN -->
   <div id="chatScreen">
     <div class="header">
-      <div class="title" id="roomTitle">Room</div>
-      <div class="status"><div class="dot" id="statusDot"></div><span id="statusText">Connecting…</span></div>
+      <button class="backBtn" id="backBtn" aria-label="Back">‹</button>
+      <div class="headerInfo">
+        <div class="title" id="roomTitle">Room</div>
+        <div class="status"><div class="dot" id="statusDot"></div><span id="statusText">Connecting…</span></div>
+      </div>
     </div>
     <div id="messages"><div class="empty">No messages yet — say hi 👋</div></div>
     <div class="inputRow">
@@ -172,6 +169,7 @@
   const whoAmI = document.getElementById("whoAmI");
   const roomCode = document.getElementById("roomCode");
   const enterBtn = document.getElementById("enterBtn");
+  const backBtn = document.getElementById("backBtn");
   const roomTitle = document.getElementById("roomTitle");
   const statusDot = document.getElementById("statusDot");
   const statusText = document.getElementById("statusText");
@@ -184,8 +182,13 @@
 
   let myIdentity = null;
   let messagesRef = null;
+  let unsubConnected = null;
+  let unsubMessages = null;
+  let isInitialLoad = true;
+  let lastSeenTimestamp = 0;
 
   enterBtn.addEventListener("click", enterChat);
+  backBtn.addEventListener("click", leaveChat);
 
   function enterChat() {
     const who = whoAmI.value;
@@ -198,9 +201,19 @@
     localStorage.setItem("walkieRoom", room);
     myIdentity = who;
 
+    // Ask for notification permission right as they enter — this needs to
+    // happen from a direct user tap, browsers block silent auto-requests.
+    if ("Notification" in window && Notification.permission === "default") {
+      Notification.requestPermission();
+    }
+
     const safeRoom = room.toLowerCase().replace(/[^a-z0-9]/g, "-");
     messagesRef = ref(db, `walkie/${safeRoom}/messages`);
     roomTitle.textContent = `Room: ${room}`;
+
+    isInitialLoad = true;
+    lastSeenTimestamp = 0;
+    messagesEl.innerHTML = '<div class="empty">No messages yet — say hi 👋</div>';
 
     setupScreen.style.display = "none";
     chatScreen.style.display = "flex";
@@ -209,22 +222,38 @@
     messageInput.focus();
   }
 
+  function leaveChat() {
+    // Detach Firebase listeners so re-entering doesn't stack duplicates
+    if (unsubConnected) unsubConnected();
+    if (unsubMessages) unsubMessages();
+    unsubConnected = null;
+    unsubMessages = null;
+    messagesRef = null;
+
+    chatScreen.style.display = "none";
+    setupScreen.style.display = "block";
+    statusText.textContent = "Connecting…";
+    statusDot.classList.remove("connected");
+  }
+
   function startListeners() {
     const connectedRef = ref(db, ".info/connected");
-    onValue(connectedRef, (snap) => {
+    unsubConnected = onValue(connectedRef, (snap) => {
       const connected = snap.val() === true;
       statusDot.classList.toggle("connected", connected);
       statusText.textContent = connected ? "Live" : "Connecting…";
     });
 
     const recentQuery = query(messagesRef, limitToLast(200));
-    onValue(recentQuery, (snapshot) => {
+    unsubMessages = onValue(recentQuery, (snapshot) => {
       const data = snapshot.val();
       if (!data) {
         messagesEl.innerHTML = '<div class="empty">No messages yet — say hi 👋</div>';
+        isInitialLoad = false;
         return;
       }
       const entries = Object.values(data).sort((a, b) => a.timestamp - b.timestamp);
+
       messagesEl.innerHTML = entries.map(e => {
         const side = e.from === myIdentity ? "me" : "them";
         const time = new Date(e.timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
@@ -234,7 +263,34 @@
           </div>`;
       }).join("");
       messagesEl.scrollTop = messagesEl.scrollHeight;
+
+      // Notify only for genuinely new messages from the other person —
+      // never on the initial history load when you first open the room.
+      if (!isInitialLoad) {
+        const newOnes = entries.filter(e => e.timestamp > lastSeenTimestamp && e.from !== myIdentity);
+        newOnes.forEach(notifyNewMessage);
+      }
+      if (entries.length) {
+        lastSeenTimestamp = entries[entries.length - 1].timestamp;
+      }
+      isInitialLoad = false;
     });
+  }
+
+  function notifyNewMessage(entry) {
+    const senderName = entry.from === "priyank" ? "Priyank" : "Akshaya";
+
+    if (navigator.vibrate) navigator.vibrate(200);
+
+    if ("Notification" in window && Notification.permission === "granted") {
+      try {
+        const n = new Notification(senderName, { body: entry.text, tag: "walkie-msg" });
+        n.onclick = () => { window.focus(); n.close(); };
+      } catch (err) {
+        // Some mobile browsers only allow notifications via a service worker;
+        // vibration above still gives a signal even if this fails silently.
+      }
+    }
   }
 
   async function sendMessage() {
